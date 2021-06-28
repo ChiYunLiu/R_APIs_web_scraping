@@ -1,0 +1,289 @@
+---
+title: 'STAT 413/613 Homework on Web Data: APIs and Scraping'
+author: "Chi-Yun, Liu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    number_sections: yes
+    toc: no
+    toc_depth: '4'
+urlcolor: blue
+
+---
+
+# Instructions {-}
+
+- Write your solutions **in this starter file**. 
+  + Modify the "author" field in the YAML header.
+- Commit R Markdown and HTML files (no PDF files). **Push both .Rmd and HTML files to GitHub**.
+  + Make sure you have knitted to HTML for your final submission.
+- **Only include necessary code and data** to answer the questions.
+- Most of the functions you use should be from the tidyverse. **Too much base R **will result in point deductions.
+- Submit a response on Canvas that your assignment is complete on GitHub
+- Feel free to use Pull requests and or email (attach your .Rmd) to ask me any questions.
+
+
+# Using APIs
+
+- Pick a website of your choice (not discussed in class) that requires a free API key to download a data set. Convert elements of interest into a tibble and create a graph to answer a question of interest.
+
+```{r message=FALSE}
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(keyring)
+```
+
+```{r}
+# data input via API
+ct_labor <- GET(url = "https://data.ct.gov/api/views/h44w-mqs3/rows.json?accessType=DOWNLOAD", apikey = key_get("datagov_API_KEY_SECURE"))
+status_code(ct_labor)
+```
+
+```{r}
+# convert and tidy interest data into a tibble
+ct_labor_text <- content(ct_labor, as = "text")
+ct_labor_json <- fromJSON(ct_labor_text)
+
+# look data str
+str(ct_labor_json$data)
+
+df_ct_labor <- as_tibble(ct_labor_json$data, .name_repair = "unique") # as.tibble
+
+
+df_ct_labor %>% 
+  select(`...13`, `...16`, `...18`) %>% 
+  rename( publish_industry_title = `...13`, `2020` = `...16`, `2019` = `...18`) %>% 
+  mutate(`2020` = parse_double(`2020`)) %>% 
+  mutate(`2019` = parse_double(`2019`)) %>% 
+  group_by(publish_industry_title) %>% 
+  summarise(total_20 = sum(`2020`),
+            total_19 = sum(`2019`)) %>% 
+  mutate(cur_1yr_diff = (round((total_20 - total_19)/total_19*100, digits = 2))) %>% 
+  arrange(cur_1yr_diff)-> job_var
+
+job_var %>% 
+  slice_head(n = 20) %>%  
+  mutate(publish_industry_title = fct_reorder(publish_industry_title, cur_1yr_diff)) %>% 
+  mutate(publish_industry_title = fct_rev(publish_industry_title)) %>% 
+  ggplot(mapping = aes(x = cur_1yr_diff, y = publish_industry_title, label = cur_1yr_diff))+
+  geom_col(position = "dodge") +
+  geom_text(position = position_dodge(width = .9), vjust = 1, hjust = "left",size = 3, colour = "white")+
+  xlab("Top 20 Negative Growth in Employment \n during 2020(percentage)")+
+  ylab("Industry Title") 
+```
+
+- State the question and interpret the plot.
+
+---> Question: Which industries have negative growth in employment during the Covid-19 pandemic in 2020 (Top 20)?
+
+As the plot, we select the top 20 industries that have negative growth employment during 2020. The worst industry is accommodation, minus 36.04%. We can see that most industries are leisure, accommodation, entertainment, and services-related industry.  The industries facing serious negative growth employment based on the plot above have the same common that is they normally need to face people and/or provide service in-person to people.
+
+```{r include=FALSE}
+# Driven_In: which industries have positive growth in employment?
+# top 20 best
+job_var %>% 
+  slice_tail(n = 20) %>% 
+  arrange(desc(cur_1yr_diff))
+```
+
+# IMDB List of Oscar Winners
+
+IMDB has a list of the [Oscar Best Picture Winners](https://www.imdb.com/search/title/?count=100&groups=oscar_best_picture_winners&sort=year%2Cdesc&ref_=nv_ch_osc).
+
+Scrape the following elements, convert the data into a tibble, tidy it, and clean it to answer the questions below: 
+
+- Number
+- Title
+- Year
+- MPAA Rating
+- Length in minutes
+- Genre
+- Star Rating
+- Metascore Rating
+- Gross Receipts
+
+Convert the data into a tibble, tidy it, and clean it to answer the following questions:
+
+```{r message=FALSE}
+library(rvest)
+# input data 
+html_obj <- read_html("../data/Best_ Picture_Winning_ IMDb.html", encoding = "UTF-8")
+html_obj
+
+class(html_obj)
+
+# get winning movie list--93titles
+best_win_mv_elements <- html_nodes(html_obj,
+                       css = ".lister-item-header a , .certificate")
+mv_text <- html_text(best_win_mv_elements)
+tibble(text = mv_text) %>% 
+  mutate(rownum = row_number(),
+         iseven = rownum %% 2 == 0,
+         movie_title = rep(1:93, each = 2)) %>% 
+  select(-rownum) %>% 
+  pivot_wider(names_from = iseven, values_from = text) %>% 
+  select(-movie_title, "mv_title" = "FALSE", "mpaa" = "TRUE") ->mv_list
+mv_list
+```
+
+
+```{r}
+# get all of the elements we want
+best_win_elements <- html_nodes(html_obj,
+                       css = ".ratings-imdb-rating strong , .ghost~ .text-muted+ span , .favorable , .genre , .runtime , .certificate , .unbold , .lister-item-header a")
+
+head(best_win_elements)
+
+best_win_text <- html_text(best_win_elements)
+head(best_win_text)
+length(best_win_text)
+
+best_win_df <- tibble(text = best_win_text)
+best_win_df %>% 
+  mutate(isnum = str_detect(text, "^\\d+\\.$"))->best_win_df # number
+
+# View(best_win_df)
+
+# get movie numbers and remove non-movie elements
+
+best_win_df %>% 
+  mutate(movienum = cumsum(isnum)) %>% 
+  filter(movienum > 0)-> best_win_df
+
+# tidy
+best_win_df %>% 
+  mutate(isname = text %in% mv_list$mv_title,  # title
+         ismpaa = text %in% mv_list$mpaa, # mpaa
+         isyear = str_detect(text, "\\(\\d+\\)"),  # year
+         isgenre = str_detect(text, "^\\n"), # genre
+         issrating = str_detect(text,"\\.\\d$"), # star rating
+         isleng = str_detect(text, "\\min$"),  # length in minutes
+         isgross = str_detect(text, "\\M$"), # gross receipts
+         ismeta = !isnum & !isname & !ismpaa & !isyear & !isgenre & !isleng & !isgross & !issrating)->best_win_df 
+
+best_win_df %>% 
+  mutate(key = case_when(isnum ~ "numbr",
+                         isname ~ "title",
+                         ismpaa ~ "MPAA",
+                         isyear ~ "year",
+                         isgenre ~ "genre",
+                         issrating ~ "star",
+                         isleng ~ "length_m",
+                         isgross ~ "gross",
+                         ismeta ~ "metascore")) %>% 
+  select(key, text, movienum) %>% 
+  pivot_wider(names_from = key, values_from = text) ->
+  best_win_wide
+
+
+# clean
+best_win_wide %>% 
+  mutate(genre = str_replace_all(genre, "\\n", ""),
+         genre = str_squish(genre),
+         numbr = parse_number(numbr),
+         year = parse_number(year),
+         length_m = parse_number(length_m),
+         star = parse_number(star),
+         metascore = parse_number(metascore),
+         gross = parse_number(gross),
+         movienum = NULL) ->best_win_wide
+best_win_wide
+```
+
+1. Show a summary of the number of data elements for each movie that are not NA. Which two elements are missing the most from the movies?
+
+---> Gross Receipts and Metascore Rating are missing the most from the movies.
+```{r}
+# Check if there has 93 movies
+sum(best_win_df$isnum)
+sum(best_win_df$isname)
+sum(best_win_df$isyear)
+sum(best_win_df$isgenre)
+sum(best_win_df$isleng)
+sum(best_win_df$isgross)
+sum(best_win_df$issrating)
+sum(best_win_df$ismeta)
+sum(best_win_df$ismpaa)
+
+# another method -->> best_win_wide %>% summarise_all(funs(sum(!is.na(.)))) 
+```
+
+2. Create a plot of the length of a film and its gross, color coded by rating. Show linear smoothers for each rating.
+- Does MPAA rating matter?  
+
+---> It does not matter since the straight lines in the plot do not have a specific trending. Only "PG-13" and "Passed" show a stronger positive relationship than others.
+```{r message=FALSE}
+best_win_wide %>% 
+  ggplot(aes(x = length_m, y = gross, color = MPAA)) +
+  geom_point(na.rm = TRUE) +
+  geom_smooth(method = lm, se = FALSE, na.rm = TRUE)
+```
+
+3. Create a plot with a single Ordinary Least Squares smoothing line with no standard errors showing for predicting stars rating based on metacritic scores for those movies that have metacritic scores. 
+- Use a linear model to assess if there is there a meaningful relationship. Show the summary of the output and interpret in terms of the $p$-value and the adjusted R-Squared?
+
+---> Since the p-value: 0.007443 at 5% significance level is smaller than .05, we reject the null hypothesis. In other words, there is evidence that there is a relationship between stars rating and meta scores. There is only 8.059% (adjusted R-squared) of variations explained by the model. The model is not good here. 
+
+```{r message=FALSE}
+# meta = x , star rating = y
+best_win_wide %>% 
+  ggplot(mapping = aes(x = metascore, y = star)) + 
+  geom_point(na.rm = TRUE) +
+  geom_smooth(method = lm, se = FALSE, na.rm = TRUE)
+
+# predict, find x and y
+reg <- lm(star ~ metascore, data = best_win_wide)
+
+summary(reg)
+```
+
+4. Use an appropriate plot to compare the gross receipts by MPAA rating.
+```{r}
+best_win_wide %>% 
+  ggplot(mapping = aes(x = MPAA, y = gross))+
+  geom_boxplot(na.rm = TRUE)
+```
+  
+  + Which MPAA rating has the highest median gross receipts?
+
+---> PG-13 has the highest median gross receipts.    
+
+  + Which R-rated movies are in the overall top 10 of gross receipts?
+  
+```{r}
+best_win_wide %>% 
+  filter(MPAA == "R") %>% 
+  arrange(desc(gross)) %>% 
+  select(numbr:MPAA, gross, everything()) %>% 
+  slice_head(n = 10)
+```
+
+  + Use one-way analysis of variance to assess the level of evidence for whether all ratings have the same mean gross receipts. Show the summary of the results and provide your interpretation of the results.
+  
+---> Since the P-value 0.0001579 is less than .05, we reject the null hypothesis. In other words, there is evidence that all ratings do not have the same mean gross receipts.
+
+```{r}
+reg01 <- lm(gross ~ MPAA, data = best_win_wide)
+anova(reg01)
+```
+
+
+# Extra Credit 1 Pts
+
+- Listen to the AI Today podcast on [Machine Learning Ops](https://podcasts.apple.com/us/podcast/ai-today-podcast-artificial-intelligence-insights-experts/id1279927057?i=1000468771571) and provide your thoughts on the following questions:  
+
+1. Does knowing about Git and GitHub help you in understanding the podcast?  
+
+* Yes, it does. Knowing about Git and GitHub help me in understanding what is the podcaster talking about. However, I think having the insights about machine learning first will be more helpful to understand this episode. Since I haven't a related experience in machine learning before, it's difficult for me to understand what they're talking about at first. I can understand they mentioned the ideas about collaboration and communication between data scientists and soft engineers but hard to understand the other things they talking about. After googling related information about Machine Learning and Machine Learning Ops, I can understand more clearly what they are talking about.  
+
+2. How do you think the ideas of ML OPs will affect your future data science projects?  
+
+* I think the ideas of ML OPs can help us achieve goals easier. Combine Machine Learning, DevOps, and Data Engineering that can make future data science projects working efficiently. Each team can focus on their core mission, collaborate easier to integrate work from different teams, and finally achieve the goal. This also highly promotes the project's reliability.
+
+
+You may also want to check out this article on [Towards Data Science](https://towardsdatascience.com/ml-ops-machine-learning-as-an-engineering-discipline-b86ca4874a3f)
